@@ -24,19 +24,22 @@ def parse_args():
 
 
 def main():
-    # Note: this scripts is broken, to align with our experiments,
-    # please refer to https://www.kaggle.com/code/leejunseok97/deepfm-deepctr-torch
-    # Basically, the C14-C21 column of the resulting sparse files should be further split to the dense files.
+    # Refactored and added additional processing from the original version to properly preprocess dense features in the Avazu dataset
+    print("starting parsing args")
     args = parse_args()
-
+    print("done parsing args")
     if args.is_split:
         if not os.path.exists(args.input_dir):
             raise ValueError(f"{args.input_dir} has existed")
 
         if not os.path.exists(args.output_dir):
             os.makedirs(args.output_dir)
+        print("finished making appropriate directories")
+        idx = 0
 
-        for _t in ("sparse", 'label'):
+        for _t in ("sparse", "dense", 'label'):
+            if (idx % 1000000 == 0):
+                print ("processing row = ", idx)
             npy = np.load(os.path.join(args.input_dir, f"{_t}.npy"))
             train_split = npy[:TOTAL_TRAINING_SAMPLES]
             np.save(os.path.join(args.output_dir, f"train_{_t}.npy"), train_split)
@@ -48,20 +51,29 @@ def main():
         if not os.path.exists(args.output_dir):
             os.makedirs(args.output_dir)
         sparse_output_file_path = os.path.join(args.output_dir, "sparse.npy")
+        dense_output_file_path = os.path.join(args.output_dir, "dense.npy")
         label_output_file_path = os.path.join(args.output_dir, "label.npy")
-
-        sparse, labels = [], []
-        for row_sparse, row_label in AvazuIterDataPipe(args.input_dir):
+        print("beginning file splitting")
+        idx = 0
+        sparse, dense, labels = [], [], []
+        for row_sparse, row_dense, row_label in AvazuIterDataPipe(args.input_dir):
+            if (idx % 1000000 == 0):
+                print ("processing row = ", idx)
             sparse.append(row_sparse)
+            dense.append(row_dense)
             labels.append(row_label)
-
+            idx += 1
+        print("done processing, now converting to numpy arrays")
         sparse_np = np.array(sparse, dtype=np.int32)
         del sparse
+        dense_np = np.array(dense, dtype=np.float32)
+        del dense
         labels_np = np.array(labels, dtype=np.int32).reshape(-1, 1)
         del labels
-
-        for f_path, arr in [(sparse_output_file_path, sparse_np), (label_output_file_path, labels_np)]:
+        print("done converting, now writing to output files")
+        for f_path, arr in [(sparse_output_file_path, sparse_np), (dense_output_file_path, dense_np), (label_output_file_path, labels_np)]:
             np.save(f_path, arr)
+    print("done!")
 
 
 if __name__ == "__main__":

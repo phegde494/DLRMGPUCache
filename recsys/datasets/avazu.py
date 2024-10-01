@@ -44,9 +44,10 @@ def _default_row_mapper(row):
         except ValueError:
             _c = 0
         _sparse.append(_c)
-    _sparse += row[14:24]
+    _sparse += row[14:16]
+    _dense = [int(d) for d in row[16:24]]
 
-    return _sparse, _label
+    return _sparse, _dense, _label
 
 
 class AvazuIterDataPipe(IterDataPipe):
@@ -117,7 +118,10 @@ class InMemoryAvazuIterDataPipe(IterableDataset):
         for _dtype, arrs, paths in zip([np.float32, np.int64, np.int32],
                                        [self.dense_arrs, self.sparse_arrs, self.labels_arrs],
                                        [self.dense_paths, self.sparse_paths, self.label_paths]):
+            # print("PATHS: ", paths)
             for idx, (range_left, range_right) in file_idx_to_row_range.items():
+                # print("idx: ", idx)
+                # print("PATHS[IDX] = ", paths[idx])
                 arrs.append(
                     BinaryCriteoUtils.load_npy_range(paths[idx],
                                                      range_left,

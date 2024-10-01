@@ -3,7 +3,7 @@ import random
 from tqdm import tqdm
 
 import numpy as np
-from .criteo import DEFAULT_CAT_NAMES
+# from .criteo import DEFAULT_CAT_NAMES
 from petastorm import make_batch_reader
 from pyarrow.parquet import ParquetDataset
 
@@ -40,6 +40,7 @@ class PetastormCounter:
         self.seed = seed
 
     def compute(self):
+        from .criteo import DEFAULT_CAT_NAMES
         _id_freq_map = np.zeros(self.total_features, dtype=np.int64)
 
         files = self.datafiles

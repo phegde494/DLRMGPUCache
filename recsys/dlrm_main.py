@@ -214,11 +214,14 @@ def _train(model,
     total = len(data_loader) if hasattr(data_loader, "__len__") else None
     meter = tqdm(itertools.count(), desc=f"Epoch {epoch}", ncols=0, total=total)
     time_elapse = 0.
+    total_time = 0.0
+    total_memory = 0
     for _ in meter:
         try:
             # We introduce a timer as a temporary solution to exclude interference
             # due to the bugs exists in NVTabular dataloader, please see my discussion:
             # https://github.com/dask/dask/discussions/9405.
+            batch_start_mem = torch.cuda.memory_allocated()
             batch = next(data_iter)
             start = time.time()
             dense, sparse, labels = put_data_in_device(batch, model.dense_device, model.sparse_device,
@@ -236,6 +239,12 @@ def _train(model,
             with record_function("(zhg)optimization"):
                 optimizer.step()
             time_elapse += time.time() - start
+            curr_time = time.time()
+            time_passed = curr_time - start
+            memory_used = torch.cuda.memory_allocated() - batch_start_mem
+            total_time += time_passed
+            total_memory += memory_used
+
             if prof:
                 prof.step()
 
@@ -253,6 +262,8 @@ def _train(model,
             break
     if hasattr(data_loader, "__len__"):
         dist_logger.info(f"average throughput: {len(data_loader) / time_elapse:.2f} it/s")
+        dist_logger.info(f"Total time for epoch {epoch}: {total_time:.2f} sec")
+        dist_logger.info(f"Total memory used for epoch {epoch}: {total_memory / 1e6:.2f} MB")
 
 
 def _evaluate(model, data_loader, stage, use_overlap, use_distributed_dataloader):
@@ -266,6 +277,8 @@ def _evaluate(model, data_loader, stage, use_overlap, use_distributed_dataloader
         data_iter = FiniteDataIter(data_loader)
     else:
         data_iter = iter(data_loader)
+    total_time = 0.0
+    total_memory = 0
 
     with torch.no_grad():
         for _ in tqdm(itertools.count(),
@@ -273,6 +286,9 @@ def _evaluate(model, data_loader, stage, use_overlap, use_distributed_dataloader
                       ncols=0,
                       total=len(data_loader) if hasattr(data_loader, "__len__") else None):
             try:
+                batch_start_time = time.time()
+                batch_start_mem = torch.cuda.memory_allocated()
+
                 dense, sparse, labels = put_data_in_device(next(data_iter), model.dense_device, model.sparse_device,
                                                            use_distributed_dataloader, rank, world_size)
                 logits = model(dense, sparse).squeeze()
@@ -281,11 +297,25 @@ def _evaluate(model, data_loader, stage, use_overlap, use_distributed_dataloader
                 labels = labels.int()
                 auroc(preds, labels)
                 accuracy(preds, labels)
+
+                batch_end_time = time.time()
+                batch_end_mem = torch.cuda.memory_allocated()
+
+                batch_time = batch_end_time - batch_start_time
+                memory_used = batch_end_mem - batch_start_mem
+
+                total_time += batch_time
+                total_memory += memory_used
             except StopIteration:
                 break
 
     auroc_res = auroc.compute().item()
     accuracy_res = accuracy.compute().item()
+
+    dist_logger.info(f"Total time for {stage} set: {total_time:.2f} sec")
+    dist_logger.info(f"Total memory used for {stage} set: {total_memory / 1e6:.2f} MB")
+
+
     dist_logger.info(f"AUROC over {stage} set: {auroc_res}", ranks=[0])
     dist_logger.info(f"Accuracy over {stage} set: {accuracy_res}", ranks=[0])
     return auroc_res, accuracy_res
@@ -437,7 +467,9 @@ def main():
             optimizer.step()
         exit(0)
 
+    print("INFORMATION: About to train_val_test!")
     train_val_test(args, model, optimizer, criterion, train_dataloader, val_dataloader, test_dataloader)
+    print("INFORMATION: At end!")
 
 
 if __name__ == "__main__":
