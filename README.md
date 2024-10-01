@@ -1,4 +1,6 @@
 # FreqAwareCache Embedding : larger embedding tables, smaller GPU memory budget.
+This is a fork in which I fix preprocessing functionality, add additional metrics, and experiment integrating different CPU/GPU configurations to gain insights about the best methods to train deep learning recommendation models.
+________________________________________________________________________________________________________________________________________________________
 
 The embedding tables in deep learning recommendation system models are becoming extremly large and cannot be fit in GPU memory.
 This project provides an efficient way to train large recommendation system models whose embedding tables can not fit in GPU memory.
