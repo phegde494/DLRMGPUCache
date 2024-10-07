@@ -17,6 +17,26 @@ import colossalai
 
 dist_logger = colossalai.logging.get_dist_logger()
 
+def get_mem_stats():
+    # Get GPU memory usage if CUDA is available
+    if torch.cuda.is_available():
+        gpu_mem_allocated = torch.cuda.memory_allocated() / (1024 ** 3)  # Convert to GB
+        gpu_mem_reserved = torch.cuda.memory_reserved() / (1024 ** 3)  # Convert to GB
+        gpu_mem_str = f"GPU memory allocated: {gpu_mem_allocated:.2f} GB, GPU memory reserved: {gpu_mem_reserved:.2f} GB"
+    else:
+        gpu_mem_str = "GPU memory not available"
+
+    # Get CPU memory usage
+    import psutil
+    process = psutil.Process(os.getpid())
+    cpu_mem_usage = process.memory_info().rss / (1024 ** 3)  # Convert to GB
+    cpu_mem_str = f"CPU memory usage: {cpu_mem_usage:.2f} GB"
+
+    # Combine the memory stats into a single string
+    mem_stats_str = f"{gpu_mem_str}, {cpu_mem_str}"
+
+    return mem_stats_str
+
 
 def parse_args():
     parser = colossalai.get_default_parser()
@@ -201,7 +221,8 @@ def _train(model,
            epoch,
            prof=None,
            use_overlap=True,
-           use_distributed_dataloader=True):
+           use_distributed_dataloader=True,
+           use_cache=False):
     model.train()
     rank = torch.distributed.get_rank()
     world_size = torch.distributed.get_world_size()
@@ -257,8 +278,10 @@ def _train(model,
             #     postfix_str += f" hit rate={hit_rate*100:.2f}%"
             # meter.set_postfix_str(postfix_str)
         except StopIteration:
-            dist_logger.info(f"{get_mem_info('Training:  ')}, "
-                             f"{model.sparse_modules.embed.cache_weight_mgr.print_comm_stats()}")
+            if (use_cache):
+                dist_logger.info(f"{get_mem_info('Training:  ')}, "
+                                f"{model.sparse_modules.embed.cache_weight_mgr.print_comm_stats()}")
+            dist_logger.info(f"Training MY METHOD: {get_mem_stats()}")
             break
     if hasattr(data_loader, "__len__"):
         dist_logger.info(f"average throughput: {len(data_loader) / time_elapse:.2f} it/s")
@@ -339,7 +362,7 @@ def train_val_test(
     ) as prof:
         for epoch in range(args.epochs):
             _train(model, optimizer, criterion, train_dataloader, epoch, prof, args.use_overlap,
-                   args.use_distributed_dataloader)
+                   args.use_distributed_dataloader, args.use_cache)
 
             val_accuracy, val_auroc = _evaluate(model, val_dataloader, "val", args.use_overlap,
                                                 args.use_distributed_dataloader)
@@ -395,7 +418,7 @@ def main():
     id_freq_map = None
     if args.use_freq:
         id_freq_map = data_module.get_id_freq_map(args.dataset_dir)
-
+        
     device = torch.device('cuda', torch.cuda.current_device())
     sparse_device = torch.device('cpu') if args.use_cpu else device
     model = HybridParallelDLRM(
@@ -418,6 +441,8 @@ def main():
         buffer_size=args.buffer_size,
         is_dist_dataloader=args.use_distributed_dataloader,
     )
+    
+
     dist_logger.info(f"{model.model_stats('DLRM')}", ranks=[0])
     dist_logger.info(f"{get_mem_info('After model init:  ')}", ranks=[0])
     for name, param in model.named_parameters():

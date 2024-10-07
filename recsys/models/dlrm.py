@@ -54,7 +54,14 @@ class FusedSparseModules(nn.Module):
                 evict_strategy=EvictionStrategy.LFU if use_lfu_eviction else EvictionStrategy.DATASET
             )
         else:
-            raise NotImplementedError("Other EmbeddingBags are under development")
+            # raise NotImplementedError("Other EmbeddingBags are under development")
+            self.embed = nn.EmbeddingBag(
+                sum(num_embeddings_per_feature),
+                embedding_dim,
+                sparse=sparse,
+                mode=reduction_mode,
+                include_last_offset=True
+            )
 
         if is_dist_dataloader:
             self.kjt_collector = KJTAllToAll(gpc.get_group(ParallelMode.GLOBAL))
@@ -68,10 +75,29 @@ class FusedSparseModules(nn.Module):
 
         keys, batch_size = sparse_features.keys(), sparse_features.stride()
 
-        flattened_sparse_embeddings = self.embed(
-            sparse_features.values(),
-            sparse_features.offsets(),
-            shape_hook=lambda x: sparse_embedding_shape_hook(x, len(keys), batch_size))
+        # flattened_sparse_embeddings = self.embed(
+        #     sparse_features.values(),
+        #     sparse_features.offsets(),
+        #     shape_hook=lambda x: sparse_embedding_shape_hook(x, len(keys), batch_size))
+
+        if hasattr(self.embed, 'forward') and 'shape_hook' in self.embed.forward.__code__.co_varnames:
+            # Case with cache enabled (e.g., using ParallelFreqAwareEmbeddingBag)
+            flattened_sparse_embeddings = self.embed(
+                sparse_features.values(),
+                sparse_features.offsets(),
+                shape_hook=lambda x: sparse_embedding_shape_hook(x, len(keys), batch_size)
+            )
+        else:
+            # Fallback case: standard EmbeddingBag usage without shape_hook
+            flattened_sparse_embeddings = self.embed(
+                sparse_features.values(),
+                sparse_features.offsets()
+            )
+        # print("EMBEDDING SHAPE = ", flattened_sparse_embeddings.shape)
+        # if flattened_sparse_embeddings.dim() == 2:
+        #     flattened_sparse_embeddings = flattened_sparse_embeddings.unsqueeze(1)
+        flattened_sparse_embeddings = flattened_sparse_embeddings.view(16384, 13, 128)
+        # print("EMBEDDING SHAPE = ", flattened_sparse_embeddings.shape)
         return flattened_sparse_embeddings
 
 
