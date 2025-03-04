@@ -16,7 +16,10 @@ import torchmetrics as metrics
 from pyre_extensions import none_throws
 from torch import nn, distributed as dist
 from torch.utils.data import DataLoader
+
 from torchrec import EmbeddingBagCollection
+
+
 from torchrec.datasets import criteo
 from torchrec.datasets.utils import Batch
 from torchrec.distributed import TrainPipelineSparseDist
@@ -33,6 +36,10 @@ from torchrec.distributed.types import ShardingEnv, ShardingType
 from torchrec.distributed.planner.types import ParameterConstraints
 from torchrec.distributed.embedding_types import EmbeddingComputeKernel
 from torch.profiler import profile, record_function, ProfilerActivity, schedule, tensorboard_trace_handler
+
+import time
+
+from cpu_gpu_planner import CPUGPUMixedShardingPlanner, get_local_size
 
 # OSS import
 try:
@@ -61,6 +68,27 @@ from recsys.utils import get_mem_info, TrainValTestResults, count_parameters
 
 TRAIN_PIPELINE_STAGES = 3    # Number of stages in TrainPipelineSparseDist.
 TOTAL_TRAINING_SAMPLES = None
+
+def get_mem_stats():
+    # Get GPU memory usage if CUDA is available
+    if torch.cuda.is_available():
+        gpu_mem_allocated = torch.cuda.memory_allocated() / (1024 ** 3)  # Convert to GB
+        gpu_mem_reserved = torch.cuda.memory_reserved() / (1024 ** 3)  # Convert to GB
+        gpu_mem_str = f"GPU memory allocated: {gpu_mem_allocated:.2f} GB, GPU memory reserved: {gpu_mem_reserved:.2f} GB"
+    else:
+        gpu_mem_str = "GPU memory not available"
+
+    # Get CPU memory usage
+    import psutil
+    process = psutil.Process(os.getpid())
+    cpu_mem_usage = process.memory_info().rss / (1024 ** 3)  # Convert to GB
+    cpu_mem_str = f"CPU memory usage: {cpu_mem_usage:.2f} GB"
+
+    # Combine the memory stats into a single string
+    mem_stats_str = f"{gpu_mem_str}, {cpu_mem_str}"
+
+    return mem_stats_str
+
 
 
 def parse_args(argv: List[str]) -> argparse.Namespace:
@@ -351,10 +379,27 @@ def _train(
     )
     samples_per_trainer = TOTAL_TRAINING_SAMPLES / dist.get_world_size() * epochs
 
+    epoch_start_time = time.time()
+    total_memory_used = 0
+
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))  # Default to 0 if LOCAL_RANK is not set
+    device = torch.device(f"cuda:{local_rank}")
+    
+    torch.cuda.set_device(device)  # Ensure correct GPU
+    start_event.record()
+
     # Infinite iterator instead of while-loop to leverage tqdm progress bar.
     for it in tqdm(itertools.count(), desc=f"Epoch {epoch}"):
         try:
+            batch_start_mem = torch.cuda.memory_allocated() if torch.cuda.is_available() else 0
+
             train_pipeline.progress(combined_iterator)
+
+            batch_end_mem = torch.cuda.memory_allocated() if torch.cuda.is_available() else 0
+            total_memory_used += (batch_end_mem - batch_start_mem)
 
             prof.step()
 
@@ -378,10 +423,23 @@ def _train(
                 train_pipeline._model.train()
         except StopIteration:
             print(f"{get_mem_info('Training:  ')}")
+            print(f"Training MY METHOD: {get_mem_stats()}")
             break
         except RuntimeError:    # petastorm dataloader StopIteration will raise RuntimeError in train_pipeline
             print(f"{get_mem_info('Training:  ')}")
+            print(f"Training MY METHOD: {get_mem_stats()}")
             break
+    
+    end_event.record()
+    torch.cuda.synchronize(device)
+    elapsed_time = start_event.elapsed_time(end_event) / 1000  # Convert ms to seconds
+    print(f"Epoch {epoch} - Elapsed time on GPU {device}: {elapsed_time:.2f} seconds")
+
+    epoch_end_time = time.time()
+    epoch_duration = epoch_end_time - epoch_start_time
+
+    print(f"Epoch {epoch} - Time taken: {epoch_duration:.2f} seconds")
+    print(f"Total memory used for epoch {epoch}: {total_memory_used / 1e6:.2f} MB")
 
 
 def train_val_test(
@@ -536,6 +594,7 @@ def main(argv: List[str]) -> None:
 
     train_model = DLRMTrain(
         embedding_bag_collection=EmbeddingBagCollection(tables=eb_configs, device=torch.device("meta")),
+        #embedding_bag_collection=EmbeddingBagCollection(tables=eb_configs, cache_ratio=0.01, device=torch.device("meta")),
         dense_in_features=len(data_module.DEFAULT_INT_NAMES),
         dense_arch_layer_sizes=list(map(int, args.dense_arch_layer_sizes.split(","))),
         over_arch_layer_sizes=list(map(int, args.over_arch_layer_sizes.split(","))),
@@ -553,34 +612,83 @@ def main(argv: List[str]) -> None:
     if dist.get_rank() == 0:
         print(count_parameters(train_model, "DLRM"))
 
-    # Torchrec Planner
-    hbm_cap = int(args.memory_fraction * 80) if args.memory_fraction else 80
-    env = ShardingEnv.from_process_group(dist.GroupMember.WORLD)
+    # # Torchrec Planner
+    # hbm_cap = int(args.memory_fraction * 80) if args.memory_fraction else 80
+    # env = ShardingEnv.from_process_group(dist.GroupMember.WORLD)
+    # topology = Topology(
+    #     world_size=env.world_size,
+    #     compute_device="cuda",
+    #     hbm_cap=hbm_cap * 1024**3,    # GPU mem
+    #     ddr_cap=1000 * 1024**3,    # CPU mem
+    # # intra_host_bw=1000 * 1024**3 / 1000,
+    # )    # Device to Device bandwidth
+    # # inter_host_bw=CROSS_NODE_BANDWIDTH,  # Not used yet
+    # #     batch_size=args.batch_size)
+    # # constraints = {
+    # #     f"t_{feature_name}":
+    # #     ParameterConstraints(compute_kernels=[EmbeddingComputeKernel.BATCHED_FUSED_UVM_CACHING.value],
+    # #                          caching_ratio=0.01 if num_embeddings > 100 else None)
+    # #     for num_embeddings, feature_name in zip(args.num_embeddings_per_feature, data_module.DEFAULT_CAT_NAMES)
+    # # }
+
     topology = Topology(
-        world_size=env.world_size,
-        compute_device="cuda",
-        hbm_cap=hbm_cap * 1024**3,    # GPU mem
-        ddr_cap=1000 * 1024**3,    # CPU mem
-    # intra_host_bw=1000 * 1024**3 / 1000,
-    )    # Device to Device bandwidth
-    # inter_host_bw=CROSS_NODE_BANDWIDTH,  # Not used yet
-    #     batch_size=args.batch_size)
+        world_size=dist.get_world_size(),
+        compute_device="cuda" if torch.cuda.is_available() else "cpu",
+        local_world_size=get_local_size(),
+    )
+
+    # no UVM cache
+
+    constraints = {
+        f"t_{feature_name}": ParameterConstraints(
+            sharding_types=[ShardingType.ROW_WISE.value],
+        )
+        for feature_name in data_module.DEFAULT_CAT_NAMES
+    }
+
+    # with UVM cache
+
     # constraints = {
-    #     f"t_{feature_name}":
-    #     ParameterConstraints(compute_kernels=[EmbeddingComputeKernel.BATCHED_FUSED_UVM_CACHING.value],
-    #                          caching_ratio=0.01 if num_embeddings > 100 else None)
-    #     for num_embeddings, feature_name in zip(args.num_embeddings_per_feature, data_module.DEFAULT_CAT_NAMES)
+    #     f"t_{feature_name}": ParameterConstraints(
+    #         sharding_types=[ShardingType.ROW_WISE.value],
+    #         compute_kernels=[EmbeddingComputeKernel.BATCHED_FUSED_UVM_CACHING.value],
+    #         caching_ratio=0.25
+    #     )
+    #     for feature_name in data_module.DEFAULT_CAT_NAMES
     # }
-    planner = EmbeddingShardingPlanner(topology=topology,
-    # constraints=constraints,
-                                      )
-    plan = planner.collective_plan(train_model, sharders, env.process_group)
+    
+
+
+    # planner = EmbeddingShardingPlanner(
+    #     topology=topology,
+    #     constraints=constraints,
+    # )
+
+    planner = CPUGPUMixedShardingPlanner(
+    topology=topology,
+    batch_size=args.batch_size,  # Make sure to pass batch_size
+    constraints=constraints,
+    cpu_offload_ratio=0.3,  # Adjust this (0.0-1.0) to control CPU/GPU split
+    debug=True,  # Set to True for detailed logging
+)
+
+    # no sharding (1 GPU or tablewise default on multiple GPUs)
+    # planner = EmbeddingShardingPlanner(topology=topology,
+    # # constraints=constraints,
+    #                                   )
+    # plan = planner.collective_plan(train_model, sharders, env.process_group)
+    # model = DistributedModelParallel(
+    #     module=train_model,
+    #     device=device,
+    #     sharders=cast(List[ModuleSharder[nn.Module]], sharders),
+    # # )
+    #     plan=plan)
+
     model = DistributedModelParallel(
         module=train_model,
-        device=device,
-        sharders=cast(List[ModuleSharder[nn.Module]], sharders),
-    # )
-        plan=plan)
+        device=torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu"),
+        plan=planner.collective_plan(train_model, [EmbeddingBagCollectionSharder()], dist.group.WORLD),
+    )
 
     print(f"{get_mem_info('After model parallel:  ')}")
     if dist.get_rank() == 0:

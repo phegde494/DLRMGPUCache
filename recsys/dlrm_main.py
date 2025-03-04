@@ -237,6 +237,7 @@ def _train(model,
     time_elapse = 0.
     total_time = 0.0
     total_memory = 0
+    startt = time.time()
     for _ in meter:
         try:
             # We introduce a timer as a temporary solution to exclude interference
@@ -266,6 +267,19 @@ def _train(model,
             total_time += time_passed
             total_memory += memory_used
 
+            # if hasattr(model.sparse_modules.embed, "num_hits_history"):
+            #     # Compute the hit rate as the ratio of hits to total (hits + misses)
+            #     num_hits = model.sparse_modules.embed.num_hits_history[-1]
+            #     num_misses = model.sparse_modules.embed.num_miss_history[-1]
+            #     hit_rate = num_hits / (num_hits + num_misses + 1e-10)  # Avoid division by zero
+
+            #     # Optionally, log the miss rate as well
+            #     miss_rate = num_misses / (num_hits + num_misses + 1e-10)
+
+            #     # Log the cache hit rate (you can also log miss rate if desired)
+            #     dist_logger.info(f"Cache hit rate: {hit_rate*100:.2f}%")
+            #     dist_logger.info(f"Cache miss rate: {miss_rate*100:.2f}%")
+
             if prof:
                 prof.step()
 
@@ -283,9 +297,12 @@ def _train(model,
                                 f"{model.sparse_modules.embed.cache_weight_mgr.print_comm_stats()}")
             dist_logger.info(f"Training MY METHOD: {get_mem_stats()}")
             break
+    endd = time.time()
+    total_total_time = endd - startt
     if hasattr(data_loader, "__len__"):
         dist_logger.info(f"average throughput: {len(data_loader) / time_elapse:.2f} it/s")
         dist_logger.info(f"Total time for epoch {epoch}: {total_time:.2f} sec")
+        dist_logger.info(f"Total time for epoch alternative method {epoch}: {total_total_time:.2f} sec")
         dist_logger.info(f"Total memory used for epoch {epoch}: {total_memory / 1e6:.2f} MB")
 
 

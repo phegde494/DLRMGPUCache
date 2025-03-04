@@ -12,8 +12,15 @@ from ..datasets.utils import KJTAllToAll
 
 import colossalai
 from colossalai.nn.parallel.layers import ParallelFreqAwareEmbeddingBag, EvictionStrategy
+
 from colossalai.core import global_context as gpc
 from colossalai.context.parallel_mode import ParallelMode
+
+from colossalai.nn.parallel.layers import FreqAwareEmbeddingBag
+
+import inspect
+import pdb
+
 
 dist_logger = colossalai.logging.get_dist_logger()
 
@@ -40,7 +47,22 @@ class FusedSparseModules(nn.Module):
                  is_dist_dataloader=True,
                  use_lfu_eviction=False):
         super(FusedSparseModules, self).__init__()
+        # for mod_name in dir(colossalai.nn):
+        #     mod = getattr(colossalai.nn, mod_name)
+        #     if inspect.isclass(mod) and mod.__name__ == "BaseEmbeddingBag":
+        #         print(f"Found in: {mod.__module__}")
+        # print("tried looking for BaseEmbeddingBag")
+
+        # source_code = inspect.getsource(ParallelFreqAwareEmbeddingBag)
+        # deeper_source_code = inspect.getsource(FreqAwareEmbeddingBag)
+        # with open("ParallelFreqAwareEmbeddingBag_source.py", "w") as file:
+        #     file.write(source_code)
+        # with open("FreqAwareEmbeddingBag_source.py", "w") as file:
+        #     file.write(deeper_source_code)
+
+
         if use_cache:
+            #pdb.set_trace()
             self.embed = ParallelFreqAwareEmbeddingBag(
                 sum(num_embeddings_per_feature),
                 embedding_dim,
